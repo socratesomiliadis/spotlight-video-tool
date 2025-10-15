@@ -28,6 +28,9 @@ export default function VideoTimeline({
   const [isDraggingStart, setIsDraggingStart] = useState(false);
   const [isDraggingEnd, setIsDraggingEnd] = useState(false);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [timelineWidth, setTimelineWidth] = useState(0);
+  const rafIdRef = useRef<number | null>(null);
+  const pendingSeekRef = useRef<number | null>(null);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -35,55 +38,144 @@ export default function VideoTimeline({
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
+  // Measure timeline width
+  useEffect(() => {
+    if (!timelineRef.current) return;
+
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setTimelineWidth(entry.contentRect.width);
+      }
+    });
+
+    resizeObserver.observe(timelineRef.current);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
+
   // Generate thumbnails from video
   useEffect(() => {
-    if (!videoElement || !duration || duration === 0) return;
+    if (!videoElement || !duration || duration === 0 || timelineWidth === 0)
+      return;
+
+    let cancelled = false;
 
     const generateThumbnails = async () => {
-      const thumbnailCount = 15; // Number of thumbnails to generate
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+      // Calculate thumbnail count based on timeline width
+      // Target ~70px per thumbnail for good quality/performance balance
+      const targetThumbnailWidth = 70;
+      const thumbnailCount = Math.max(
+        10,
+        Math.min(30, Math.floor(timelineWidth / targetThumbnailWidth))
+      );
 
-      // Set canvas size to match video aspect ratio but smaller
-      const aspectRatio = videoElement.videoWidth / videoElement.videoHeight;
-      canvas.height = 64; // Match timeline height
-      canvas.width = canvas.height * aspectRatio;
-
-      const newThumbnails: string[] = [];
-      const originalTime = videoElement.currentTime;
-
+      // Calculate times to capture
+      const times: number[] = [];
       for (let i = 0; i < thumbnailCount; i++) {
-        const time = (duration / thumbnailCount) * i;
-
-        // Seek to the time
-        videoElement.currentTime = time;
-        await new Promise<void>((resolve) => {
-          const seeked = () => {
-            videoElement.removeEventListener("seeked", seeked);
-            resolve();
-          };
-          videoElement.addEventListener("seeked", seeked);
-          // Timeout fallback
-          setTimeout(resolve, 100);
-        });
-
-        // Draw the frame
-        ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-
-        // Convert to data URL
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-        newThumbnails.push(dataUrl);
+        times.push((duration / thumbnailCount) * i);
       }
 
-      // Restore original time
-      videoElement.currentTime = originalTime;
+      // Calculate canvas dimensions
+      const aspectRatio = videoElement.videoWidth / videoElement.videoHeight;
+      const canvasHeight = 64; // Match timeline height
+      const canvasWidth = canvasHeight * aspectRatio;
 
-      setThumbnails(newThumbnails);
+      const newThumbnails: string[] = new Array(thumbnailCount);
+      const originalTime = videoElement.currentTime;
+
+      // Process thumbnails in batches of 3 for speed (parallel seeking)
+      const batchSize = 3;
+      const batches = Math.ceil(thumbnailCount / batchSize);
+
+      for (let batchIndex = 0; batchIndex < batches; batchIndex++) {
+        if (cancelled) break;
+
+        const batchStart = batchIndex * batchSize;
+        const batchEnd = Math.min(batchStart + batchSize, thumbnailCount);
+        const batchPromises = [];
+
+        for (let i = batchStart; i < batchEnd; i++) {
+          const time = times[i];
+          const index = i;
+
+          // Create a promise for each thumbnail in the batch
+          const promise = (async () => {
+            // Create a separate canvas for each thumbnail to avoid race conditions
+            const canvas = document.createElement("canvas");
+            const ctx = canvas.getContext("2d", { alpha: false });
+            if (!ctx) return { index, dataUrl: "" };
+
+            canvas.height = canvasHeight;
+            canvas.width = canvasWidth;
+
+            // Create a temporary video element for parallel seeking
+            const tempVideo = document.createElement("video");
+            tempVideo.src = videoElement.src;
+            tempVideo.muted = true;
+            tempVideo.preload = "metadata";
+
+            await new Promise<void>((resolve) => {
+              tempVideo.onloadedmetadata = () => resolve();
+            });
+
+            // Seek to the target time
+            tempVideo.currentTime = time;
+            await new Promise<void>((resolve) => {
+              let resolved = false;
+              const seeked = () => {
+                if (!resolved) {
+                  resolved = true;
+                  tempVideo.removeEventListener("seeked", seeked);
+                  // Small delay to ensure frame is ready
+                  setTimeout(resolve, 30);
+                }
+              };
+              tempVideo.addEventListener("seeked", seeked);
+              setTimeout(() => {
+                if (!resolved) {
+                  resolved = true;
+                  tempVideo.removeEventListener("seeked", seeked);
+                  resolve();
+                }
+              }, 300);
+            });
+
+            // Draw the frame to this thumbnail's dedicated canvas
+            ctx.drawImage(tempVideo, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
+
+            // Clean up
+            tempVideo.src = "";
+            tempVideo.remove();
+
+            return { index, dataUrl };
+          })();
+
+          batchPromises.push(promise);
+        }
+
+        // Wait for all thumbnails in this batch
+        const results = await Promise.all(batchPromises);
+        results.forEach(({ index, dataUrl }) => {
+          newThumbnails[index] = dataUrl;
+        });
+      }
+
+      if (!cancelled) {
+        // Restore original time
+        videoElement.currentTime = originalTime;
+        setThumbnails(newThumbnails);
+      }
     };
 
     generateThumbnails();
-  }, [videoElement, duration]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [videoElement, duration, timelineWidth]);
 
   const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!timelineRef.current || isDraggingStart || isDraggingEnd) return;
@@ -107,15 +199,51 @@ export default function VideoTimeline({
     if (isDraggingStart) {
       const newTime = Math.max(0, Math.min(endTime - 0.1, time));
       onStartTimeChange(newTime);
-      onSeek(newTime);
+      pendingSeekRef.current = newTime;
+
+      // Throttle seeking using requestAnimationFrame
+      if (rafIdRef.current === null) {
+        rafIdRef.current = requestAnimationFrame(() => {
+          if (pendingSeekRef.current !== null) {
+            onSeek(pendingSeekRef.current);
+            pendingSeekRef.current = null;
+          }
+          rafIdRef.current = null;
+        });
+      }
     } else if (isDraggingEnd) {
       const newTime = Math.max(startTime + 0.1, Math.min(duration, time));
       onEndTimeChange(newTime);
-      onSeek(newTime);
+      pendingSeekRef.current = newTime;
+
+      // Throttle seeking using requestAnimationFrame
+      if (rafIdRef.current === null) {
+        rafIdRef.current = requestAnimationFrame(() => {
+          if (pendingSeekRef.current !== null) {
+            onSeek(pendingSeekRef.current);
+            pendingSeekRef.current = null;
+          }
+          rafIdRef.current = null;
+        });
+      }
     }
   };
 
   const handleMouseUp = () => {
+    // Cancel any pending animation frame
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+
+    // Do a final seek to ensure we're at the exact position
+    if (isDraggingStart) {
+      onSeek(startTime);
+    } else if (isDraggingEnd) {
+      onSeek(endTime);
+    }
+
+    pendingSeekRef.current = null;
     setIsDraggingStart(false);
     setIsDraggingEnd(false);
   };
@@ -127,6 +255,11 @@ export default function VideoTimeline({
       return () => {
         window.removeEventListener("mousemove", handleMouseMove);
         window.removeEventListener("mouseup", handleMouseUp);
+        // Clean up any pending animation frame
+        if (rafIdRef.current !== null) {
+          cancelAnimationFrame(rafIdRef.current);
+          rafIdRef.current = null;
+        }
       };
     }
   }, [isDraggingStart, isDraggingEnd, duration, startTime, endTime]);
@@ -147,94 +280,77 @@ export default function VideoTimeline({
       <div
         ref={timelineRef}
         onClick={handleTimelineClick}
-        className="relative h-16 bg-muted rounded-md cursor-pointer overflow-hidden border"
+        className="relative h-16 bg-muted cursor-pointer rounded-md border-[2px] border-black/20"
       >
-        {/* Video thumbnails */}
-        {thumbnails.length > 0 && (
-          <div className="absolute inset-0 flex">
-            {thumbnails.map((thumbnail, index) => (
-              <div
-                key={index}
-                className="flex-1 h-full bg-cover bg-center"
-                style={{
-                  backgroundImage: `url(${thumbnail})`,
-                  backgroundSize: "cover",
-                }}
-              />
-            ))}
-          </div>
-        )}
+        {/* Thumbnails and overlays container - clipped to rounded corners */}
+        <div className="absolute inset-0 overflow-hidden rounded-md">
+          {/* Video thumbnails */}
+          {thumbnails.length > 0 && (
+            <div className="absolute inset-0 flex">
+              {thumbnails.map((thumbnail, index) => (
+                <div
+                  key={index}
+                  className="flex-1 h-full bg-cover bg-center"
+                  style={{
+                    backgroundImage: `url(${thumbnail})`,
+                    backgroundSize: "cover",
+                  }}
+                />
+              ))}
+            </div>
+          )}
 
-        {/* Overlay for non-selected regions */}
-        <div
-          className="absolute top-0 bottom-0 left-0 bg-black/60 pointer-events-none"
-          style={{ width: `${startPercentage}%` }}
-        />
-        <div
-          className="absolute top-0 bottom-0 right-0 bg-black/60 pointer-events-none"
-          style={{ width: `${100 - endPercentage}%` }}
-        />
-
-        {/* Selected region borders */}
-        <div
-          className="absolute top-0 bottom-0 border-l-2 border-r-2 border-foreground pointer-events-none"
-          style={{
-            left: `${startPercentage}%`,
-            right: `${100 - endPercentage}%`,
-          }}
-        />
+          {/* Overlay for non-selected regions */}
+          <div
+            className="absolute top-0 bottom-0 left-0 bg-white/85 pointer-events-none"
+            style={{ width: `${startPercentage}%` }}
+          />
+          <div
+            className="absolute top-0 bottom-0 right-0 bg-white/85 pointer-events-none"
+            style={{ width: `${100 - endPercentage}%` }}
+          />
+        </div>
 
         {/* Current time indicator */}
         <div
           className="absolute top-0 bottom-0 w-0.5 bg-foreground z-20"
           style={{ left: `${currentPercentage}%` }}
         >
-          <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-3 h-3 bg-foreground rounded-full" />
+          <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-3 h-3 bg-foreground rounded-full " />
         </div>
 
         {/* Start handle */}
         <div
-          className="absolute top-0 bottom-0 w-1 bg-foreground cursor-ew-resize z-30 hover:w-2 transition-all"
+          className="absolute top-0 bottom-0 w-1 bg-foreground cursor-ew-resize z-30 hover:w-2 transition-[width] duration-100"
           style={{ left: `${startPercentage}%` }}
           onMouseDown={(e) => {
             e.stopPropagation();
             setIsDraggingStart(true);
           }}
         >
-          <div className="absolute top-1/2 -translate-y-1/2 -left-2 w-5 h-8 bg-foreground rounded-sm flex items-center justify-center">
+          <div className="absolute top-1/2 -translate-y-1/2 -left-2 w-5 h-8 bg-foreground rounded-sm flex items-center justify-center ">
             <ChevronLeft className="w-4 h-4 text-background" />
           </div>
-          <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-foreground whitespace-nowrap font-mono">
+          <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-foreground whitespace-nowrap font-mono bg-background/90 px-1 py-0.5 rounded shadow-sm select-none">
             {formatTime(startTime)}
           </div>
         </div>
 
         {/* End handle */}
         <div
-          className="absolute top-0 bottom-0 w-1 bg-foreground cursor-ew-resize z-30 hover:w-2 transition-all"
+          className="absolute top-0 bottom-0 w-1 bg-foreground cursor-ew-resize z-30 hover:w-2 transition-[width] duration-100"
           style={{ left: `${endPercentage}%` }}
           onMouseDown={(e) => {
             e.stopPropagation();
             setIsDraggingEnd(true);
           }}
         >
-          <div className="absolute top-1/2 -translate-y-1/2 -right-2 w-5 h-8 bg-foreground rounded-sm flex items-center justify-center">
+          <div className="absolute top-1/2 -translate-y-1/2 -right-2 w-5 h-8 bg-foreground rounded-sm flex items-center justify-center ">
             <ChevronRight className="w-4 h-4 text-background" />
           </div>
-          <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-foreground whitespace-nowrap font-mono">
+          <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-foreground whitespace-nowrap font-mono bg-background/90 px-1 py-0.5 rounded shadow-sm select-none">
             {formatTime(endTime)}
           </div>
-        </div>
-
-        {/* Time markers */}
-        <div className="absolute inset-0 flex items-end">
-          {[0, 0.25, 0.5, 0.75, 1].map((fraction) => (
-            <div
-              key={fraction}
-              className="absolute bottom-0 h-2 w-px bg-black"
-              style={{ left: `${fraction * 100}%` }}
-            />
-          ))}
         </div>
       </div>
     </div>
