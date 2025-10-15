@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
 import Header from "@/components/header";
@@ -9,17 +9,37 @@ const helveticaNow = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Video Editor - Trim, Compress & Convert",
+  title: "Spotlight — Video Tool",
   description:
-    "Browser-based video processing tool. Trim, compress, and convert videos to WebM using hardware-accelerated WebCodecs API. All processing happens locally in your browser.",
-  keywords: [
-    "video editor",
-    "video converter",
-    "webm",
-    "video compression",
-    "webcodecs",
-    "browser video editor",
-  ],
+    "A tool to trim, compress, and convert videos directly in your browser.",
+  icons: {
+    icon: "/favicon.ico",
+  },
+  openGraph: {
+    title: "Spotlight — Video Tool",
+    type: "website",
+    url: "https://video-tool.spotlight.day",
+    description:
+      "A tool to trim, compress, and convert videos directly in your browser.",
+    images: [
+      {
+        url: "https://video-tool.spotlight.day/ogImage.png",
+        width: 1600,
+        height: 900,
+        alt: "Preview image for Spotlight — Video Tool",
+        type: "image/png",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    site: "@SpotlightDay",
+  },
+  robots: "index, follow",
+};
+
+export const viewport: Viewport = {
+  themeColor: "#ffffff",
 };
 
 export default function RootLayout({
