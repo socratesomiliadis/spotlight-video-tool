@@ -75,7 +75,7 @@ const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(
           onPlay={() => setIsPlaying(true)}
           onPause={() => setIsPlaying(false)}
           className="w-full h-auto max-h-[500px] object-contain"
-          controls
+          muted
         />
         <Button
           onClick={togglePlayPause}

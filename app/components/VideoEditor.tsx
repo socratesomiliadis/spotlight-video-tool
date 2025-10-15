@@ -110,8 +110,8 @@ export default function VideoEditor({ file, onClose }: VideoEditorProps) {
   };
 
   return (
-    <div className="max-w-6xl mx-auto">
-      <Card className="border-black/20 shadow-none">
+    <div className="w-full my-32">
+      <Card className="border-[#EAEAEA] shadow-none">
         <CardHeader>
           <div className="flex justify-between items-center">
             <div>
@@ -166,7 +166,7 @@ export default function VideoEditor({ file, onClose }: VideoEditorProps) {
             onFpsChange={setFps}
           />
 
-          <div className="flex gap-4">
+          <div className="flex gap-2">
             <Button
               onClick={handleExport}
               disabled={isProcessing}

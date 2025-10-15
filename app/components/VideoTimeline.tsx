@@ -28,6 +28,8 @@ export default function VideoTimeline({
   const [isDraggingStart, setIsDraggingStart] = useState(false);
   const [isDraggingEnd, setIsDraggingEnd] = useState(false);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
+  const [thumbnailProgress, setThumbnailProgress] = useState(0);
   const [timelineWidth, setTimelineWidth] = useState(0);
   const rafIdRef = useRef<number | null>(null);
   const pendingSeekRef = useRef<number | null>(null);
@@ -61,6 +63,8 @@ export default function VideoTimeline({
       return;
 
     let cancelled = false;
+    setIsGeneratingThumbnails(true);
+    setThumbnailProgress(0);
 
     const generateThumbnails = async () => {
       // Calculate thumbnail count based on timeline width
@@ -114,37 +118,71 @@ export default function VideoTimeline({
             const tempVideo = document.createElement("video");
             tempVideo.src = videoElement.src;
             tempVideo.muted = true;
-            tempVideo.preload = "metadata";
+            tempVideo.preload = "auto"; // Changed from "metadata" to "auto"
+            tempVideo.crossOrigin = "anonymous";
 
-            await new Promise<void>((resolve) => {
-              tempVideo.onloadedmetadata = () => resolve();
+            // Wait for video to be ready to play
+            await new Promise<void>((resolve, reject) => {
+              const timeout = setTimeout(
+                () => reject(new Error("Timeout loading video")),
+                5000
+              );
+
+              const onCanPlay = () => {
+                clearTimeout(timeout);
+                tempVideo.removeEventListener("canplay", onCanPlay);
+                tempVideo.removeEventListener("loadedmetadata", onCanPlay);
+                resolve();
+              };
+
+              // Listen to both events in case one is already fired
+              if (tempVideo.readyState >= 3) {
+                // HAVE_FUTURE_DATA or better
+                clearTimeout(timeout);
+                resolve();
+              } else {
+                tempVideo.addEventListener("canplay", onCanPlay);
+                tempVideo.addEventListener("loadedmetadata", onCanPlay);
+              }
             });
 
             // Seek to the target time
             tempVideo.currentTime = time;
-            await new Promise<void>((resolve) => {
+
+            // Wait for seek to complete AND frame to be ready
+            await new Promise<void>((resolve, reject) => {
               let resolved = false;
-              const seeked = () => {
+              const timeout = setTimeout(() => {
                 if (!resolved) {
                   resolved = true;
-                  tempVideo.removeEventListener("seeked", seeked);
-                  // Small delay to ensure frame is ready
-                  setTimeout(resolve, 30);
+                  cleanup();
+                  resolve(); // Don't reject, just resolve with whatever we have
+                }
+              }, 1000);
+
+              const cleanup = () => {
+                tempVideo.removeEventListener("seeked", onSeeked);
+                tempVideo.removeEventListener("canplay", onSeeked);
+              };
+
+              const onSeeked = () => {
+                if (!resolved && tempVideo.readyState >= 2) {
+                  // HAVE_CURRENT_DATA or better
+                  resolved = true;
+                  clearTimeout(timeout);
+                  cleanup();
+                  // Give extra time for frame to be fully decoded
+                  setTimeout(resolve, 100);
                 }
               };
-              tempVideo.addEventListener("seeked", seeked);
-              setTimeout(() => {
-                if (!resolved) {
-                  resolved = true;
-                  tempVideo.removeEventListener("seeked", seeked);
-                  resolve();
-                }
-              }, 300);
+
+              tempVideo.addEventListener("seeked", onSeeked);
+              tempVideo.addEventListener("canplay", onSeeked);
             });
 
             // Draw the frame to this thumbnail's dedicated canvas
             ctx.drawImage(tempVideo, 0, 0, canvas.width, canvas.height);
-            const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
 
             // Clean up
             tempVideo.src = "";
@@ -161,19 +199,31 @@ export default function VideoTimeline({
         results.forEach(({ index, dataUrl }) => {
           newThumbnails[index] = dataUrl;
         });
+
+        // Update progress
+        if (!cancelled) {
+          const progress = (batchEnd / thumbnailCount) * 100;
+          setThumbnailProgress(progress);
+        }
       }
 
       if (!cancelled) {
         // Restore original time
         videoElement.currentTime = originalTime;
         setThumbnails(newThumbnails);
+        setIsGeneratingThumbnails(false);
+        setThumbnailProgress(100);
       }
     };
 
-    generateThumbnails();
+    generateThumbnails().catch((error) => {
+      console.error("Error generating thumbnails:", error);
+      setIsGeneratingThumbnails(false);
+    });
 
     return () => {
       cancelled = true;
+      setIsGeneratingThumbnails(false);
     };
   }, [videoElement, duration, timelineWidth]);
 
@@ -284,8 +334,22 @@ export default function VideoTimeline({
       >
         {/* Thumbnails and overlays container - clipped to rounded corners */}
         <div className="absolute inset-0 overflow-hidden rounded-md">
+          {/* Loading indicator */}
+          {isGeneratingThumbnails && (
+            <div className="absolute inset-0 flex items-center justify-center bg-muted z-10">
+              <div className="text-center">
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <div className="w-4 h-4 border-2 border-foreground/20 border-t-foreground rounded-full animate-spin" />
+                  <span>
+                    Generating thumbnails... {Math.round(thumbnailProgress)}%
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Video thumbnails */}
-          {thumbnails.length > 0 && (
+          {thumbnails.length > 0 && !isGeneratingThumbnails && (
             <div className="absolute inset-0 flex">
               {thumbnails.map((thumbnail, index) => (
                 <div

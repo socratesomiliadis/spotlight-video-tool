@@ -186,3 +186,7 @@
 body {
   letter-spacing: var(--tracking-normal);
 }
+
+html {
+  overflow-x: hidden;
+}

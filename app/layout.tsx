@@ -53,7 +53,7 @@ export default function RootLayout({
         className={`${helveticaNow.variable} font-helvetica-now antialiased`}
       >
         <Header />
-        {children}
+        <div className="relative px-[22vw]">{children}</div>
       </body>
     </html>
   );
